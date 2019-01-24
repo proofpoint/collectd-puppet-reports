@@ -6,9 +6,6 @@ import os
 
 NAME = 'puppet_reports'
 
-class PuppetReportsConfig:
-  reports_dir = '/var/lib/puppet/reports'
-  verbose = False
 
 def compute_log_metrics(data):
   return {'log_info': len(filter(lambda x: safe_get(x, ['level'], '') == 'info', data)),
@@ -57,56 +54,65 @@ def map_value(node):
   else:
     return node
 
-
-def read_callback():
-  yaml.add_multi_constructor("!", identity)
-  logger('verb', "starting run")
-  for report_dir in os.listdir(PuppetReportsConfig.reports_dir):
-    logger('verb', "parsing: %s" % report_dir)
-    reports_dir = os.listdir(PuppetReportsConfig.reports_dir + '/' + report_dir)
-    reports_dir.sort
-    last_report = reports_dir[-1]
-    last_report_file = PuppetReportsConfig.reports_dir + '/' + report_dir + '/' + last_report
-    with open(last_report_file, "r") as stream:
-      data = yaml.load(stream)
-      data = map_value(data)
-      results = compute_metrics(data)
-      logger('verb', "ready to send")
-      for k in results:
-        logger('verb', ("pushing value for %s => %s = %s" % (report_dir, k, results[k])))
-        val = collectd.Values(plugin=NAME, type='gauge')
-        val.plugin_instance = report_dir
-        val.type_instance = k
-        try:
-          val.values = [ float(results[k]) ]
-        except:
-          logger('warn', ("value %s => %s for %s cannot be parsed to float" % (k, results[k], report_dir)))
-          val.values = [ 0.0 ]
-        val.dispatch()
-
-def configure_callback(conf):
-  yaml.add_multi_constructor("!", identity)
-  logger('verb', "configuring")
-
-  for node in conf.children:
-    if node.key == 'ReportsDir':
-      PuppetReportsConfig.reports_dir = node.values[0]
-    elif node.key == 'Verbose':
-      PuppetReportsConfig.verbose = node.values[0]
-    else:
-      logger('verb', "unknown config key in puppet module: %s" % node.key)
+class PuppetReports:
+  
+  def __init__(self):
+      self.report_file = '/var/lib/puppet/state/last_run_report.yaml'
+      self.last_report_file_mtime = 0
+      self.verbose = False
+      
+  def read_callback(self):
+    yaml.add_multi_constructor("!", identity)
+    self.logger('verb', "parsing: %s" % self.report_file)
     
-# logging function
-def logger(t, msg):
+    time = os.path.getmtime(self.report_file)
+    if time != self.last_report_file_mtime:
+      with open(self.report_file, "r") as stream:
+        self.last_report_file_mtime = time
+        data = yaml.load(stream)
+        data = map_value(data)
+        results = compute_metrics(data)
+        self.logger('verb', "ready to send")
+        for k in results:
+          self.logger('verb', ("pushing value for %s => %s = %s" % (self.report_file, k, results[k])))
+          val = collectd.Values(plugin=NAME, type='gauge')
+          val.plugin_instance = 'last_run'
+          val.type_instance = k
+          #metric time is the mtime of the file which should match when puppet ran last
+          val.time = time
+          try:
+            val.values = [ float(results[k]) ]
+          except:
+            self.logger('warn', ("value %s => %s for %s cannot be parsed to float" % (k, results[k], self.report_file)))
+            val.values = [ 0.0 ]
+          val.dispatch()
+      
+  
+  def configure_callback(self, conf):
+    yaml.add_multi_constructor("!", identity)
+    self.logger('verb', "configuring")
+  
+    for node in conf.children:
+      if node.key == 'LastReportFile':
+        self.report_file = node.values[0]
+      elif node.key == 'Verbose':
+        self.verbose = node.values[0]
+      else:
+        self.logger('verb', "unknown config key in puppet module: %s" % node.key)
+      
+  # logging function
+  def logger(self, t, msg):
     if t == 'err':
         collectd.error('%s: %s' % (NAME, msg))
     elif t == 'warn':
         collectd.warning('%s: %s' % (NAME, msg))
     elif t == 'verb':
-        if PuppetReportsConfig.verbose:
+        if self.verbose:
             collectd.info('%s: %s' % (NAME, msg))
     else:
         collectd.notice('%s: %s' % (NAME, msg))
 
-collectd.register_config(configure_callback)
-collectd.register_read(read_callback)
+reports = PuppetReports()
+collectd.register_config(reports.configure_callback)
+collectd.register_read(reports.read_callback)
+
